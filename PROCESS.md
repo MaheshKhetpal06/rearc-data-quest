@@ -1,7 +1,8 @@
 # Process
 
-> **Status:** deployed with an Asset Bundle to Databricks Free Edition and run end to end on 1 Nov 2026. Still to
-> do before submitting: the Retrospective, the AI usage details and the screenshots.
+> **Status:** deployed with an Asset Bundle to Databricks Free Edition (`dev` and `prod` targets) and run end to end
+> on 1-2 Nov 2026. Screenshots are listed in [docs/SCREENSHOTS.md](docs/SCREENSHOTS.md). The
+> [README](README.md) has the reviewer runbook.
 
 ## The data
 Profiled once with `scripts/profile_sources.py` before any modeling (figures from 1 Nov 2026).
@@ -76,7 +77,14 @@ reflect changed and removed files.
 
 **SQL or PySpark.** SQL is primary for all three answers because the logic reads naturally as set operations and
 is easy for an analyst to review. The PySpark versions in `transforms/final_tables.py` are the documented
-alternative, and `primary_language` in config switches between them. Everything around the answers is PySpark, because looping over config is much easier in Python.
+alternative, and `primary_language` in config switches between them. Everything around the answers is PySpark,
+because looping over config is much easier in Python.
+
+An earlier version of the job compared both versions with `exceptAll` in both directions after every run. On the
+full data, all three answers matched on `dev` (1 Nov 2026) and `prod` (2 Nov 2026). I then removed that comparison
+and its unit test, because the two versions implement the same logic and the check added a job step without adding
+much. The PySpark versions are no longer executed by any job or test. Changing `primary_language` to `pyspark` and
+running the pipeline would exercise them.
 
 **Decisions on the answers:**
 - **Annual-only series:** kept with a NULL best year and `has_quarterly_data = false`, rather than dropped or
@@ -122,10 +130,95 @@ repo, in an environment variable or a Databricks secret.
   `max_concurrent_runs: 1`. A Delta table would be better with several writers.
 - **Secrets:** a shared team mailbox would be better than a personal contact.
 
+## Requirement coverage
+| Requirement | Status | Evidence |
+|---|---|---|
+| Land the full BLS `pr` folder in a Volume | Complete, runtime-verified | All 12 files landed on `dev` and `prod`, including `pr.txt` and `pr.contacts` |
+| Resolve the BLS 403 the way BLS asks | Complete, runtime-verified | Contact in the User-Agent, read from a Databricks secret |
+| No hardcoded filenames | Complete | Files come from the listing and are routed by pattern (`route_file`), with unknown files landing under `unmapped/` |
+| Re-runs handle added, changed and removed data | Complete, runtime-verified | Unit tests, plus a simulated change, removal and addition on `dev` (1 Nov 2026) that the transform tables reflected correctly |
+| Re-runs don't reprocess | Complete, runtime-verified | Repeat runs report `{'unchanged': 13}` and land nothing |
+| Population API saved as JSON in the same Volume | Complete, runtime-verified | `raw/population/.../population.json` |
+| Bronze, Silver and Gold as a Spark Declarative Pipeline | Complete, runtime-verified | 10 raw, 10 transform and 3 final tables |
+| Expectations: expected schema, non-null keys | Complete, runtime-verified | Field-count and non-null expectations, 0 failures on `prod`. Column names and order are checked at ingestion, not as an expectation |
+| Each answer in Spark SQL and in PySpark | Implemented | SQL feeds Gold. PySpark matched it on full data on 1-2 Nov 2026, but nothing executes it now (see above) |
+| Gold answers correct | Runtime-verified | Values in the README, cross-checked against a pure-Python profile and DuckDB |
+| Human-readable series labels | Complete, runtime-verified | `series_label` from the sector, measure, duration and class lookups |
+| Read the provider's docs | Complete | `pr.txt` (Q05, file formats) and the DataUSA API docs (address, 1-year vs 5-year) |
+| Public repository, PROCESS.md | Complete | |
+| Screenshots | Pending | Checklist in `docs/SCREENSHOTS.md` |
+| Bonus: deploy with Asset Bundles | Implemented, runtime-verified | `databricks.yml`, deployed to `dev` and `prod`, including through GitHub Actions |
+| Bonus: Genie space or dashboard | Not implemented | |
+| Bonus: Unity Catalog access controls | Not implemented | Described under trade-offs only |
+| Extra: CI, quality job, metadata columns | Implemented | CI ran 63 tests on GitHub, including Spark; the quality job reports 39 of 39 checks |
+
 ## Retrospective
-*To be written by me after the first deployed run: what was hardest to get right, and what surprised me.*
+This is a record of what actually caused difficulty, taken from the project history.
+
+- **The data was the subtle part, not the code.** Three traps would each have given a plausible but wrong answer
+  without an error:
+  - `Q05` mixed into the quarterly sums
+  - `pr.data.0.Current` loaded alongside `AllData`
+  - padded headers and fields breaking joins
+
+  Profiling the files before modeling found all three, and two contradicted or went beyond the documentation.
+  `pr.txt` describes `Current` as year-to-date, but it goes back to 1995.
+- **Change handling with append-only raw tables.** Auto Loader only appends, so changed and removed files needed a
+  separate record of which file version is current. The answer was immutable landing folders plus a manifest that the
+  transform layer joins against. It was confirmed on Databricks with a simulated change, removal and new file.
+- **Packaging the wheel for the pipeline.** The first deployment failed with
+  `ModuleNotFoundError: No module named 'rearc_quest'`. The pipeline's editable install of the project didn't work
+  on serverless, and attaching the built wheel, as the job does, fixed it.
+- **Choosing the population figure.** The API offers 1-year and 5-year ACS estimates, and they give 2013-2018 means
+  about 4.6 million apart. Choosing deliberately mattered more than any code.
+- **Testing Spark without Java.** Local Spark needs a JVM, which I chose not to install. The Spark tests run in CI
+  instead, and locally through Databricks Connect, which needed a separate environment and version pins.
+- **Tooling around the work.** Getting the GitHub token's permissions right (contents, then workflows, then
+  actions) and keeping a personal email out of commit history took more time than expected.
 
 ## AI usage
-I used Claude Code to profile the data, draft the code, tests, deployment files and this document. I set the
-architecture direction: raw/transform/final layers, metadata columns, config-driven ingestion, a shared Spark
-utilities module, and wheel packaging. *Before submitting, update this with what I changed or fixed myself.*
+I used Claude Code (Anthropic) throughout this project. To be clear about who did what:
+
+**Decisions I made**
+- **Layers:** raw, transform and final, mapped to Bronze, Silver and Gold.
+- **Metadata columns in every layer:** `_EXECUTION_PARTITION`, `_RAW_DATA_HASH`, `_INGESTED_AT` and
+  `_PROCESSED_AT`, later adding `_SOURCE_URI` and `_FILE_NAME`.
+- **Config-driven ingestion:** one `dataset_config_definition.py` holding each dataset's schema, table names,
+  transform method, source and credential.
+- **Code structure:** reusable Spark utilities in one `spark_utils.py`, called by transform methods.
+- **Packaging and deployment:** a wheel deployed with an Asset Bundle, with no notebooks.
+- **Local setup:** a Python virtual environment only, with no Java.
+- **Data quality:** simple PySpark checks rather than an external tool.
+- **Profiling first:** profile the data with a one-time download before creating the repo.
+- **API address:** switch the population API to the address in DataUSA's documentation.
+- **Removing the equivalence check:** drop the SQL-vs-PySpark comparison job.
+- **Header checks:** add a check of source column names.
+- **Order of steps:** deploy to `prod` before taking screenshots.
+
+**What Claude Code did**
+- **Research:** read the assignment, the BLS documentation and the Databricks documentation, and checked the data
+  sources.
+- **Profiling:** wrote and ran the profiling script, and summarised the data findings.
+- **Code:** wrote the code, tests, bundle configuration, CI workflows and drafts of these documents.
+- **Running it:** ran the deployments, jobs, pipeline updates and SQL checks through the Databricks CLI.
+- **Fixes:** diagnosed and fixed the wheel import failure, and the deployment configuration issues the CLI reported.
+- **Explanations:** explained the design, including the best-year SQL and ingestion end to end, so I could review
+  it.
+
+**Validation, and who ran it**
+- **Run by me:**
+  - installing and logging in to the Databricks CLI
+  - inspecting the secret scope
+  - creating the GitHub repository and token
+  - pushing and rewriting the commit history
+  - adding the GitHub Actions secrets and starting the Deploy workflow, which deployed `prod` successfully
+  - reviewing the results reported back to me
+- **Run by Claude Code at my request:**
+  - unit tests: locally, through Databricks Connect, and in CI on GitHub
+  - local and Databricks ingestion, including the repeat-run and simulated-change tests
+  - full job runs on `dev` and `prod`
+  - SQL queries confirming the answers, the row counts and the expectation metrics
+- **Not yet done:** the screenshots in `docs/SCREENSHOTS.md`, which I'll capture myself.
+
+*To confirm before submitting: add a line here stating that you have reviewed the code, or note any part you changed
+yourself.*
