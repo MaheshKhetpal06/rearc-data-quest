@@ -1,0 +1,93 @@
+bundle:
+  name: rearc_data_quest
+
+variables:
+  catalog:
+    description: Unity Catalog catalog. Free Edition provides `workspace`.
+    default: workspace
+  schema:
+    description: Schema holding the Volume and all tables.
+    default: rearc_quest
+
+artifacts:
+  rearc_quest_wheel:
+    type: whl
+    build: python -m build --wheel
+    path: .
+
+resources:
+  schemas:
+    quest:
+      catalog_name: ${var.catalog}
+      name: ${var.schema}
+      comment: Rearc data quest tables
+
+  volumes:
+    landing:
+      catalog_name: ${var.catalog}
+      schema_name: ${resources.schemas.quest.name}
+      name: landing
+      volume_type: MANAGED
+      comment: Raw source files, landed unchanged
+
+  pipelines:
+    quest_pipeline:
+      name: rearc_quest_pipeline
+      serverless: true
+      catalog: ${var.catalog}
+      schema: ${resources.schemas.quest.name}
+      channel: CURRENT
+      root_path: ./src/pipeline
+      libraries:
+        - file:
+            path: ./src/pipeline/definitions.py
+      environment:
+        dependencies:
+          - ./dist/*.whl
+      configuration:
+        rearc.volume_path: /Volumes/${var.catalog}/${resources.schemas.quest.name}/${resources.volumes.landing.name}
+
+  jobs:
+    quest_job:
+      name: rearc_quest_job
+      max_concurrent_runs: 1
+      environments:
+        - environment_key: wheel
+          spec:
+            environment_version: "3"
+            dependencies:
+              - ./dist/*.whl
+      tasks:
+        - task_key: ingest
+          environment_key: wheel
+          python_wheel_task:
+            package_name: rearc_quest
+            entry_point: rearc-ingest
+            named_parameters:
+              volume-path: /Volumes/${var.catalog}/${resources.schemas.quest.name}/${resources.volumes.landing.name}
+        - task_key: run_pipeline
+          depends_on:
+            - task_key: ingest
+          pipeline_task:
+            pipeline_id: ${resources.pipelines.quest_pipeline.id}
+        - task_key: quality_checks
+          depends_on:
+            - task_key: run_pipeline
+          environment_key: wheel
+          python_wheel_task:
+            package_name: rearc_quest
+            entry_point: rearc-quality
+            named_parameters:
+              catalog: ${var.catalog}
+              schema: ${resources.schemas.quest.name}
+
+targets:
+  dev:
+    default: true
+    mode: development
+    variables:
+      schema: rearc_quest_dev
+  prod:
+    mode: production
+    workspace:
+      root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}

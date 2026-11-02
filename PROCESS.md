@@ -75,9 +75,8 @@ Transform tables read only the versions the manifest marks active. That's how an
 reflect changed and removed files.
 
 **SQL or PySpark.** SQL is primary for all three answers because the logic reads naturally as set operations and
-is easy for an analyst to review. The PySpark versions are in `transforms/final_tables.py`, and
-`jobs/validate_equivalence.py` compares both with `exceptAll` in both directions. Everything around the answers is
-PySpark, because looping over config is much easier in Python.
+is easy for an analyst to review. The PySpark versions in `transforms/final_tables.py` are the documented
+alternative, and `primary_language` in config switches between them. Everything around the answers is PySpark, because looping over config is much easier in Python.
 
 **Decisions on the answers:**
 - **Annual-only series:** kept with a NULL best year and `has_quarterly_data = false`, rather than dropped or

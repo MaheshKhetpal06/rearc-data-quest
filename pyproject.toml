@@ -1,0 +1,46 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "rearc_quest"
+version = "0.1.0"
+description = "Config-driven BLS productivity and US population pipeline for Databricks"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "requests>=2.31",
+    "databricks-sdk>=0.30",
+]
+
+[project.optional-dependencies]
+dev = [
+    "build>=1.2",
+    "duckdb>=1.0",
+    "pytest>=8.0",
+    "ruff>=0.5",
+]
+# Spark tests need a JVM (CI) or Databricks Connect. They skip when neither is available.
+spark = ["pyspark>=4.0"]
+
+[project.scripts]
+rearc-ingest = "rearc_quest.jobs.ingest:main"
+rearc-quality = "rearc_quest.jobs.run_quality_checks:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/rearc_quest"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+
+[tool.ruff.lint.per-file-ignores]
+"scripts/profile_sources.py" = ["E501", "E731", "B007", "B023", "B905"]
