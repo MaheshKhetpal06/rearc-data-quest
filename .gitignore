@@ -1,0 +1,25 @@
+# Local secrets and contact details
+.env
+.env.*
+!.env.example
+
+# Local data (profile downloads, local ingestion runs)
+.sample/
+.local_volume/
+
+# Python
+.venv/
+.venv-connect/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+
+# Databricks
+.databricks/
+
+# OS
+.DS_Store
