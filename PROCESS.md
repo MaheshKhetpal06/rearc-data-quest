@@ -1,8 +1,8 @@
 # Process
 
-> **Status:** deployed with an Asset Bundle to Databricks Free Edition (`dev` and `prod` targets) and run end to end
-> on 1-2 Nov 2026. Screenshots are listed in [docs/SCREENSHOTS.md](docs/SCREENSHOTS.md). The
-> [README](README.md) has the reviewer runbook.
+> **Status:** deployed with an Asset Bundle to Databricks Free Edition (`dev` and `prod` targets), both manually
+> and through GitHub Actions, and run end to end on 1-3 Nov 2026. Screenshots from `prod` are indexed in
+> [docs/SCREENSHOTS.md](docs/SCREENSHOTS.md). The [README](README.md) has the reviewer runbook.
 
 ## The data
 Profiled once with `scripts/profile_sources.py` before any modeling (figures from 1 Nov 2026).
@@ -99,10 +99,35 @@ running the pipeline would exercise them.
 - **A caveat on meaning:** two-thirds of series are percent changes, and summing those isn't economically
   meaningful. The label names the duration so readers can see that.
 
-**Data quality.** Ingestion rejects a file whose column names or order differ from config. Expectations fail on an unexpected field count at raw, drop rows with null keys or bad types at
-transform, warn on missing lookup labels, and fail on an invalid final table. `try_cast` turns bad values into
-NULLs so expectations can count them instead of the run crashing. `quality/checks.py` adds simple checks after the
-pipeline. Results are saved to `quality_results`.
+**Data quality.** Ingestion rejects a file whose column names or order differ from config. Expectations fail on an
+unexpected field count at raw, drop rows with null keys or bad types at transform, warn on missing lookup labels,
+and fail on an invalid final table. `try_cast` turns bad values into NULLs so expectations can count them instead of
+the run crashing. `quality/checks.py` adds simple checks after the pipeline. Results are saved to `quality_results`.
+
+**A job and a pipeline, and why both.** The pipeline (`rearc_quest_pipeline`) only builds tables: it reads files
+already in the Volume and produces the 23 `raw_*`, `transform_*` and `final_*` tables, with expectations and
+lineage. Downloading from BLS and DataUSA isn't something a pipeline should do: it's ordinary Python with HTTP
+requests, a manifest and writes to the Volume, and pipeline dataset functions must not perform writes or other side
+effects. Writing `quality_results` is also a table write the pipeline can't make. So the job (`rearc_quest_job`)
+runs three tasks in order:
+1. `ingest`, the wheel entry point `rearc-ingest`, which lands files
+2. `run_pipeline`, which builds the tables
+3. `quality_checks`, the wheel entry point `rearc-quality`, which checks the results
+
+If a task fails, the later ones are skipped. The job is also the one thing to schedule or start from CI/CD. The
+pipeline can still run alone to rebuild tables from what's already landed.
+
+**Logging.** Both wheel entry points use Python's standard `logging`, so the logs appear in each task's output in
+the job run:
+- **Ingestion:** run start, each source's discovery counts, each downloaded file's outcome with its dataset, size
+  and partition, removed files as warnings, every HTTP request with status, size and duration, where the BLS contact
+  came from, failures with the source and totals so far, and a one-line run summary. The run ID is the execution
+  partition, which ties the log to the landing folders.
+- **Quality checks:** one line per table and a run summary.
+- **Never logged:** credentials, the contact email and HTTP headers, because the User-Agent contains the contact.
+
+Per-table pipeline progress and expectation results are in the pipeline's event log rather than in Python logs,
+because dataset functions are evaluated repeatedly and shouldn't log.
 
 **Access to BLS.** BLS rejects requests without contact details, so the client sends
 `rearc-data-quest/1.0 (contact: ...)` as its policy asks, and pauses between requests. The contact stays out of the
@@ -129,6 +154,42 @@ repo, in an environment variable or a Databricks secret.
 - **Manifest:** a JSON file is simple and works without Spark, but a single writer is assumed. The job sets
   `max_concurrent_runs: 1`. A Delta table would be better with several writers.
 - **Secrets:** a shared team mailbox would be better than a personal contact.
+- **Quality history:** `quality_results` is overwritten each run, so only the latest results are kept. Appending
+  with a run timestamp would give a trend.
+- **Run correlation:** logs use the ingestion run's partition as the run ID. Passing the Databricks job run ID into
+  the tasks would tie logs, tables and job runs together directly.
+
+## To-dos before production
+With more time, I would have added these before calling this production-ready:
+
+- **Alerting**
+  - Notify on job or pipeline failure, quality check failures, and expectation drop rates above a threshold.
+  - Alert on source freshness, for example BLS not publishing when expected, or a `SourceSchemaError`.
+  - Route alerts to a team channel rather than a personal inbox.
+- **Lineage tracking**
+  - Unity Catalog already records table-level lineage for the pipeline.
+  - I'd extend it end to end, so each Gold row can be traced back to its source file, landing partition and job run.
+    That means passing the Databricks job run ID into every task and log, and checking column-level lineage from
+    Bronze to Gold.
+- **Dashboarding**
+  - An AI/BI dashboard on the Gold tables for the three answers.
+  - Operational views: run history, durations, file outcomes per run, expectation pass rates and quality results
+    over time. That needs `quality_results` to keep history rather than only the latest run.
+- **Semantic layer for AI and Genie**
+  - Describe the Gold tables so an AI agent can answer plain-English questions through a Genie space:
+    - table and column comments
+    - business definitions, for example best year, sample standard deviation, and what each series label means
+    - metric definitions
+    - example questions with their trusted SQL
+  - Grant a read-only role on the Gold layer only, so the agent queries curated data, never raw files.
+
+**Known gaps in the current code**
+- **Unused config fields:** `DatasetConfig.schema_name` and `final_table_name` aren't read anywhere. Tables go to
+  the bundle's schema, and `FINAL_TABLES` drives the Gold tables.
+- **Secret lookup hides errors:** `get_secret` treats any error reaching Databricks as a missing secret, which can
+  hide an authentication or network problem.
+- **Untested paths:** the failure paths of the new logging, `bundle destroy`, and the local Files API fallback
+  haven't been run.
 
 ## Requirement coverage
 | Requirement | Status | Evidence |
@@ -146,11 +207,12 @@ repo, in an environment variable or a Databricks secret.
 | Human-readable series labels | Complete, runtime-verified | `series_label` from the sector, measure, duration and class lookups |
 | Read the provider's docs | Complete | `pr.txt` (Q05, file formats) and the DataUSA API docs (address, 1-year vs 5-year) |
 | Public repository, PROCESS.md | Complete | |
-| Screenshots | Pending | Checklist in `docs/SCREENSHOTS.md` |
+| Screenshots | Complete | 16 screenshots from `prod`, indexed in `docs/SCREENSHOTS.md` |
 | Bonus: deploy with Asset Bundles | Implemented, runtime-verified | `databricks.yml`, deployed to `dev` and `prod`, including through GitHub Actions |
 | Bonus: Genie space or dashboard | Not implemented | |
 | Bonus: Unity Catalog access controls | Not implemented | Described under trade-offs only |
 | Extra: CI, quality job, metadata columns | Implemented | CI ran 63 tests on GitHub, including Spark; the quality job reports 39 of 39 checks |
+| Extra: CD and operational logging | Implemented, runtime-verified | A push to `main` deployed `prod` through GitHub Actions on 3 Nov 2026, and the following `prod` run showed the new logs |
 
 ## Retrospective
 This is a record of what actually caused difficulty, taken from the project history.
@@ -169,10 +231,6 @@ This is a record of what actually caused difficulty, taken from the project hist
 - **Packaging the wheel for the pipeline.** The first deployment failed with
   `ModuleNotFoundError: No module named 'rearc_quest'`. The pipeline's editable install of the project didn't work
   on serverless, and attaching the built wheel, as the job does, fixed it.
-- **Choosing the population figure.** The API offers 1-year and 5-year ACS estimates, and they give 2013-2018 means
-  about 4.6 million apart. Choosing deliberately mattered more than any code.
-- **Testing Spark without Java.** Local Spark needs a JVM, which I chose not to install. The Spark tests run in CI
-  instead, and locally through Databricks Connect, which needed a separate environment and version pins.
 - **Tooling around the work.** Getting the GitHub token's permissions right (contents, then workflows, then
   actions) and keeping a personal email out of commit history took more time than expected.
 
@@ -193,13 +251,15 @@ I used Claude Code (Anthropic) throughout this project. To be clear about who di
 - **API address:** switch the population API to the address in DataUSA's documentation.
 - **Removing the equivalence check:** drop the SQL-vs-PySpark comparison job.
 - **Header checks:** add a check of source column names.
+- **Logging:** add operational logging only, with no behaviour changes, and test it by deploying through CD rather
+  than by hand.
 - **Order of steps:** deploy to `prod` before taking screenshots.
 
 **What Claude Code did**
 - **Research:** read the assignment, the BLS documentation and the Databricks documentation, and checked the data
   sources.
 - **Profiling:** wrote and ran the profiling script, and summarised the data findings.
-- **Code:** wrote the code, tests, bundle configuration, CI workflows and drafts of these documents.
+- **Code:** wrote the code, tests, bundle configuration, CI workflows, the logging and drafts of these documents.
 - **Running it:** ran the deployments, jobs, pipeline updates and SQL checks through the Databricks CLI.
 - **Fixes:** diagnosed and fixed the wheel import failure, and the deployment configuration issues the CLI reported.
 - **Explanations:** explained the design, including the best-year SQL and ingestion end to end, so I could review
@@ -212,13 +272,13 @@ I used Claude Code (Anthropic) throughout this project. To be clear about who di
   - creating the GitHub repository and token
   - pushing and rewriting the commit history
   - adding the GitHub Actions secrets and starting the Deploy workflow, which deployed `prod` successfully
+  - capturing the screenshots in `docs/SCREENSHOTS.md` from the `prod` workspace
   - reviewing the results reported back to me
 - **Run by Claude Code at my request:**
   - unit tests: locally, through Databricks Connect, and in CI on GitHub
   - local and Databricks ingestion, including the repeat-run and simulated-change tests
-  - full job runs on `dev` and `prod`
+  - full job runs on `dev` and `prod`, including the 3 Nov `prod` run after CD deployed the logging
   - SQL queries confirming the answers, the row counts and the expectation metrics
-- **Not yet done:** the screenshots in `docs/SCREENSHOTS.md`, which I'll capture myself.
+  - checks that the screenshots came from `prod` and showed no personal details
 
-*To confirm before submitting: add a line here stating that you have reviewed the code, or note any part you changed
-yourself.*
+

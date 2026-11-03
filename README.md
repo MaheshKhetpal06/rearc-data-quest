@@ -15,9 +15,10 @@ Pipeline. It is deployed with a Databricks Asset Bundle.
 5. [Verifying the results](#verifying-the-results)
 6. [Running locally](#running-locally)
 7. [CI/CD](#cicd)
-8. [Troubleshooting](#troubleshooting)
-9. [Cleanup](#cleanup)
-10. [Known limitations](#known-limitations)
+8. [Logs and monitoring](#logs-and-monitoring)
+9. [Troubleshooting](#troubleshooting)
+10. [Cleanup](#cleanup)
+11. [Known limitations](#known-limitations)
 
 ## Architecture
 ```mermaid
@@ -154,12 +155,22 @@ databricks bundle deploy -t dev --var="catalog=<your_catalog>"
 databricks bundle run quest_job -t dev
 ```
 This runs the job's three tasks in order: `ingest`, `run_pipeline`, `quality_checks`. On Free Edition it took about
-10 minutes, most of it serverless start-up and the pipeline update. Output from a successful run looks like this:
+10 minutes, most of it serverless start-up and the pipeline update.
+
+The job runs ingestion and the quality checks around the pipeline, because the pipeline only builds tables from
+files already in the Volume. PROCESS.md explains why both are needed.
+
+On a first run, the `ingest` task output lists every downloaded file, then ends like this:
 ```
-INFO Ingestion <run> finished: {'added': 13}
+INFO Ingestion <run_id> finished: {'added': 13}
+INFO Run summary: run_id=<run_id> status=SUCCEEDED duration=...s added=13 changed=0 unchanged=0 removed=0
+```
+A second run should report `0 to download, 12 unchanged (skipped)` and `{'unchanged': 13}`, which shows that nothing
+is downloaded or landed again. The `quality_checks` task output ends with:
+```
+INFO Run summary: status=SUCCEEDED duration=...s checks=39 passed=39 failed=0
 39 of 39 checks passed
 ```
-A second run should report `{'unchanged': 13}`, which shows that nothing is downloaded or landed again.
 
 You can also run the parts separately:
 ```bash
@@ -307,6 +318,19 @@ databricks bundle run quest_pipeline -t dev
 `deploy.yml` and `run_pipeline.yml` need the repository secrets `DATABRICKS_HOST` and `DATABRICKS_TOKEN`. In a fork
 without them, Deploy fails at `bundle validate` with "cannot configure default credentials", while CI still passes.
 
+On the author's repository, a push to `main` on 3 Nov 2026 ran CI and Deploy successfully, and Deploy updated `prod`.
+
+## Logs and monitoring
+| What | Where |
+|---|---|
+| Ingestion: sources, files discovered, each file's outcome, HTTP requests, run summary | Job run → `ingest` task → Output |
+| Table build progress, row counts, expectation results | Pipeline page → latest update → a table's Data quality tab, or the event log (query in [Verifying the results](#verifying-the-results)) |
+| Quality checks: one line per table and a run summary | Job run → `quality_checks` task → Output, and the `quality_results` table |
+| Task status and duration | Job page → Runs |
+
+The logs never contain credentials, the BLS contact email or HTTP headers. To find which files a run landed, look in
+the Volume folder `raw/<dataset>/_EXECUTION_PARTITION=<run_id>/`, where `run_id` is the value in the run summary.
+
 ## Troubleshooting
 | Symptom | Likely cause | Fix |
 |---|---|---|
@@ -335,6 +359,8 @@ Destroy hasn't been tested on this project. If the schema remains afterwards, dr
 - **Single writer:** the manifest is a JSON file, so one ingestion at a time is assumed. The job sets
   `max_concurrent_runs: 1`.
 - **Time-dependent values:** the expected values above depend on BLS and DataUSA data as of 1-2 Nov 2026.
+- **Latest results only:** `quality_results` holds only the latest run. Earlier results are in each job run's
+  `quality_checks` output.
 - **Files API fallback:** the route that runs ingestion locally and uploads through the Files API hasn't been
   exercised end to end.
 
