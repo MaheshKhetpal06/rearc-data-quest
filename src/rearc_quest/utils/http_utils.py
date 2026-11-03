@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 
 import requests
@@ -12,6 +13,9 @@ from rearc_quest.config.dataset_config_definition import DatasetConfig
 from rearc_quest.utils.secret_utils import get_secret
 
 TIMEOUT_SECONDS = 60
+
+# Headers are never logged: the User-Agent carries the BLS contact.
+log = logging.getLogger(__name__)
 
 
 class SourceAccessError(RuntimeError):
@@ -39,10 +43,17 @@ class HttpClient:
         self.session.mount("https://", HTTPAdapter(max_retries=retry))
 
     def get(self, url: str) -> bytes:
+        started = time.monotonic()
         try:
             response = self.session.get(url, timeout=TIMEOUT_SECONDS)
         except requests.RequestException as exc:
+            log.error("GET %s failed after %.2fs: %s", url, time.monotonic() - started, type(exc).__name__)
             raise SourceAccessError(f"Could not reach {url}: {exc}") from exc
+        elapsed = time.monotonic() - started
+        if not response.ok:
+            log.error("GET %s returned HTTP %d after %.2fs", url, response.status_code, elapsed)
+        else:
+            log.info("GET %s -> HTTP %d, %d bytes in %.2fs", url, response.status_code, len(response.content), elapsed)
         if response.status_code == 403:
             raise SourceAccessError(
                 f"403 from {url}. BLS requires contact details in the User-Agent; check the configured "

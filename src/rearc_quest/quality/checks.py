@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 
 from rearc_quest.config.dataset_config_definition import DATASETS, FINAL_TABLES
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -40,11 +43,20 @@ def run_all_checks(spark: SparkSession) -> list[CheckResult]:
     targets = [(d.transform_table_name, d.keys) for d in DATASETS if d.is_modeled]
     targets += [(f.name, f.keys) for f in FINAL_TABLES]
     results = []
+    log.info("Running quality checks on %d tables", len(targets))
     for table, keys in targets:
         df = spark.read.table(table)
-        results += [
+        table_results = [
             check_not_empty(df, table),
             check_null_keys(df, table, keys),
             check_duplicate_keys(df, table, keys),
         ]
+        results += table_results
+        outcome = ", ".join(
+            f"{r.check}={'pass' if r.passed else f'FAIL ({r.failing_rows} rows)'}" for r in table_results
+        )
+        if all(r.passed for r in table_results):
+            log.info("Quality checks for %s (keys %s): %s", table, ", ".join(keys), outcome)
+        else:
+            log.error("Quality checks for %s (keys %s): %s", table, ", ".join(keys), outcome)
     return results

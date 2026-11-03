@@ -5,6 +5,8 @@ transform_* materialized views of the active file versions, typed and validated
 final_*     materialized views answering the three questions
 """
 
+import logging
+
 from pyspark import pipelines as dp
 from pyspark.sql import SparkSession
 
@@ -14,6 +16,10 @@ from rearc_quest.utils import spark_utils as su
 
 spark = SparkSession.getActiveSession()
 VOLUME_PATH = spark.conf.get("rearc.volume_path")
+
+# Logged once per graph load, never inside dataset functions, which the pipeline evaluates repeatedly.
+# Per-table progress, row counts and expectation results are in the pipeline event log.
+log = logging.getLogger(__name__)
 
 
 def _apply_expectations(function, *, fail=None, drop=None, warn=None):
@@ -73,3 +79,11 @@ for _dataset in DATASETS:
 
 for _config in FINAL_TABLES:
     _register_final(_config)
+
+log.info(
+    "Registered %d raw, %d transform and %d final tables from config; volume_path=%s",
+    sum(d.is_modeled for d in DATASETS),
+    sum(d.is_modeled for d in DATASETS),
+    len(FINAL_TABLES),
+    VOLUME_PATH,
+)

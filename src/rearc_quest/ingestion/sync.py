@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import time
 from collections import Counter
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -78,6 +79,16 @@ def sync_directory(
 ) -> Counter:
     listed: dict[str, ListedFile] = parse_listing(client.get(source_url).decode("utf-8", "replace"))
     plan = plan_directory_sync(listed, manifest, source_url)
+    log.info(
+        "Discovered %d files at %s: %d to download, %d unchanged (skipped), %d removed from source",
+        len(listed),
+        source_url,
+        len(plan.to_download),
+        len(plan.unchanged),
+        len(plan.removed),
+    )
+    if plan.unchanged:
+        log.debug("Unchanged, not downloaded: %s", ", ".join(plan.unchanged))
     counts = Counter(unchanged=len(plan.unchanged))
     for name in plan.to_download:
         dataset_name = route_file(name, source_url)
@@ -97,9 +108,22 @@ def sync_directory(
             modified=listed[name].modified,
             size=listed[name].size,
         )
+        log.info(
+            "File %s (dataset %s, %d bytes): %s%s",
+            name,
+            dataset_name,
+            len(body),
+            outcome,
+            "" if outcome == "unchanged" else f", landed in partition {execution_partition}",
+        )
         counts[outcome] += 1
     for name in plan.removed:
         manifest[name]["status"] = REMOVED
+        log.warning(
+            "File %s (dataset %s) is no longer at the source; marked removed, landed copy kept",
+            name,
+            manifest[name]["dataset"],
+        )
         counts["removed"] += 1
     return counts
 
@@ -125,6 +149,14 @@ def sync_api(
         modified=None,
         size=len(body),
     )
+    log.info(
+        "API response %s (dataset %s, %d bytes): %s%s",
+        POPULATION_FILE_NAME,
+        dataset.name,
+        len(body),
+        outcome,
+        "" if outcome == "unchanged" else f", landed in partition {execution_partition}",
+    )
     return Counter({outcome: 1})
 
 
@@ -136,20 +168,58 @@ def run_ingestion(
 ) -> Counter:
     """Sync every configured source and return counts of added, changed, unchanged and removed files."""
     execution_partition = execution_partition or new_execution_partition()
+    run_started = time.monotonic()
     manifest = load_manifest(storage)
+    log.info(
+        "Ingestion %s started: %d sources, manifest has %d entries",
+        execution_partition,
+        len({d.source_url for d in datasets}),
+        len(manifest),
+    )
     totals: Counter = Counter()
     seen_directories = set()
     for dataset in datasets:
         if dataset.source_type == HTTP_DIRECTORY and dataset.source_url in seen_directories:
             continue
-        client = client_factory(dataset)
-        if dataset.source_type == HTTP_DIRECTORY:
-            seen_directories.add(dataset.source_url)
-            totals += sync_directory(client, storage, manifest, dataset.source_url, execution_partition)
-        elif dataset.source_type == HTTP_API:
-            totals += sync_api(client, storage, manifest, dataset, execution_partition)
-        else:
-            raise ValueError(f"Unknown source type: {dataset.source_type}")
-        save_manifest(storage, manifest)
+        source_started = time.monotonic()
+        log.info("Syncing %s source for %s: %s", dataset.source_type, dataset.name, dataset.source_url)
+        try:
+            client = client_factory(dataset)
+            if dataset.source_type == HTTP_DIRECTORY:
+                seen_directories.add(dataset.source_url)
+                source_counts = sync_directory(client, storage, manifest, dataset.source_url, execution_partition)
+            elif dataset.source_type == HTTP_API:
+                source_counts = sync_api(client, storage, manifest, dataset, execution_partition)
+            else:
+                raise ValueError(f"Unknown source type: {dataset.source_type}")
+            totals += source_counts
+            save_manifest(storage, manifest)
+        except Exception:
+            log.exception(
+                "Ingestion %s FAILED while syncing %s (%s) after %.1fs. Manifest not saved for this source; "
+                "totals before it: %s",
+                execution_partition,
+                dataset.name,
+                dataset.source_url,
+                time.monotonic() - source_started,
+                dict(totals),
+            )
+            raise
+        log.info(
+            "Source %s synced in %.1fs: %s; manifest saved (%d entries)",
+            dataset.source_url,
+            time.monotonic() - source_started,
+            dict(source_counts),
+            len(manifest),
+        )
     log.info("Ingestion %s finished: %s", execution_partition, dict(totals))
+    log.info(
+        "Run summary: run_id=%s status=SUCCEEDED duration=%.1fs added=%d changed=%d unchanged=%d removed=%d",
+        execution_partition,
+        time.monotonic() - run_started,
+        totals["added"],
+        totals["changed"],
+        totals["unchanged"],
+        totals["removed"],
+    )
     return totals

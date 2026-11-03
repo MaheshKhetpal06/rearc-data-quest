@@ -21,8 +21,15 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    log = logging.getLogger(__name__)
+    log.info(
+        "Ingestion job starting: volume_path=%s storage=%s",
+        args.volume_path,
+        "files_api" if args.use_files_api else "filesystem",
+    )
     storage = FilesApiStorage(args.volume_path) if args.use_files_api else LocalStorage(args.volume_path)
     run_ingestion(lambda dataset: HttpClient(build_user_agent(dataset)), storage)
+    log.info("Ingestion job completed")
 
 
 if __name__ == "__main__":
