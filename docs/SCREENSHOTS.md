@@ -8,6 +8,7 @@ captured on 2-3 Nov 2026. The job and log screenshots come from run `10647679878
 |---|---|
 | [Job tasks](screenshots/screenshots/job-run-tasks.png) | `rearc_quest_job` deployed by the Asset Bundle: `ingest` → `run_pipeline` → `quality_checks` |
 | [Job runs](screenshots/screenshots/job-run.png) | Successful runs of the job, with each task's status |
+| [Pipeline graph](screenshots/screenshots/pipeline-graph.png) | `rearc_quest_pipeline`: the full graph from Volume sources to the `raw_*`, `transform_*` and `final_*` tables. All 23 tables completed, with expectations met |
 | [Ingest log](screenshots/screenshots/ingest-output.png) | Ingestion log: secret resolved from the scope, 12 BLS files unchanged and skipped, population unchanged, run summary |
 | [Pipeline expectations](screenshots/screenshots/pipeline_expectations.png) | `transform_bls_data`: 77,126 rows written, 0 dropped, all four expectations at 0% failed |
 | [Quality check log](screenshots/screenshots/quality-output.png) | Per-table results, 39 results written, `39 of 39 checks passed` |
